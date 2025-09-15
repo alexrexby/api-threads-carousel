@@ -22,7 +22,25 @@ class CarouselConfigSchema(Schema):
         error_messages={'invalid': 'Must be a valid hex color (e.g., #000000)'}
     )
     
-    # Font settings
+    # Font settings with Google Fonts support
+    font_family = fields.Str(
+        validate=validate.Length(min=1, max=100),
+        missing='Inter',
+        error_messages={'invalid': 'Font family name must be 1-100 characters'}
+    )
+    
+    font_weight = fields.Str(
+        validate=validate.OneOf(['100', '200', '300', '400', '500', '600', '700', '800', '900']),
+        missing='400',
+        error_messages={'invalid': 'Font weight must be a valid value (100-900)'}
+    )
+    
+    title_font_weight = fields.Str(
+        validate=validate.OneOf(['100', '200', '300', '400', '500', '600', '700', '800', '900']),
+        missing='600',
+        error_messages={'invalid': 'Title font weight must be a valid value (100-900)'}
+    )
+    
     font_size = fields.Int(
         validate=validate.Range(min=8, max=200),
         missing=44,
@@ -93,6 +111,13 @@ class CarouselConfigSchema(Schema):
         error_messages={'invalid': 'Text alignment must be left, center, or right'}
     )
     
+    # Slide separator (optional)
+    slide_separator = fields.Str(
+        validate=validate.Length(min=1, max=20),
+        missing='========',
+        error_messages={'invalid': 'Slide separator must be 1-20 characters'}
+    )
+    
     @validates('logo_text')
     def validate_logo_text(self, value):
         """Validate logo text when add_logo_text is True"""
@@ -140,7 +165,9 @@ class CarouselRequestSchema(Schema):
         
         # Ensure text has proper slide separators
         text = data['text']
-        if '========' not in text and len(text) > 500:
+        separator = data.get('config', {}).get('slide_separator', '========')
+        
+        if separator not in text and len(text) > 500:
             # If text is long but has no separators, suggest adding them
             data['_warnings'] = ['Long text without slide separators detected']
         
@@ -186,6 +213,13 @@ class ConfigRequestSchema(Schema):
         error_messages={'invalid': 'Style preferences must be a valid dictionary'}
     )
     
+    # Font preferences
+    preferred_font_category = fields.Str(
+        validate=validate.OneOf(['sans-serif', 'serif', 'display', 'any']),
+        missing='any',
+        error_messages={'invalid': 'Font category must be sans-serif, serif, display, or any'}
+    )
+    
     @validates('description')
     def validate_description(self, value):
         """Validate style description"""
@@ -196,6 +230,48 @@ class ConfigRequestSchema(Schema):
         inappropriate_words = ['hack', 'exploit', 'malicious', 'virus']
         if any(word in value.lower() for word in inappropriate_words):
             raise ValidationError('Description contains inappropriate content')
+
+class FontPreviewRequestSchema(Schema):
+    """Schema for font preview request validation"""
+    
+    font_family = fields.Str(
+        required=True,
+        validate=validate.Length(min=1, max=100),
+        error_messages={
+            'required': 'Font family is required',
+            'invalid': 'Font family must be 1-100 characters'
+        }
+    )
+    
+    font_weight = fields.Str(
+        validate=validate.OneOf(['100', '200', '300', '400', '500', '600', '700', '800', '900']),
+        missing='400',
+        error_messages={'invalid': 'Font weight must be a valid value (100-900)'}
+    )
+    
+    text = fields.Str(
+        validate=validate.Length(min=1, max=200),
+        missing='Sample Text',
+        error_messages={'invalid': 'Preview text must be 1-200 characters'}
+    )
+    
+    background_color = fields.Str(
+        validate=validate.Regexp(r'^#[0-9A-Fa-f]{6}$'),
+        missing='#ffffff',
+        error_messages={'invalid': 'Must be a valid hex color'}
+    )
+    
+    text_color = fields.Str(
+        validate=validate.Regexp(r'^#[0-9A-Fa-f]{6}$'),
+        missing='#000000',
+        error_messages={'invalid': 'Must be a valid hex color'}
+    )
+    
+    font_size = fields.Int(
+        validate=validate.Range(min=12, max=120),
+        missing=48,
+        error_messages={'invalid': 'Font size must be between 12 and 120'}
+    )
 
 class BatchCarouselRequestSchema(Schema):
     """Schema for batch carousel generation"""
@@ -219,6 +295,42 @@ class BatchCarouselRequestSchema(Schema):
     async_processing = fields.Bool(
         missing=True,
         error_messages={'invalid': 'Async processing flag must be boolean'}
+    )
+
+class FontRecommendationRequestSchema(Schema):
+    """Schema for font recommendation request"""
+    
+    platform = fields.Str(
+        validate=validate.OneOf([
+            'instagram_post', 'instagram_story', 'linkedin', 
+            'tiktok', 'twitter', 'facebook'
+        ]),
+        missing='instagram_post',
+        error_messages={'invalid': 'Must be a supported platform'}
+    )
+    
+    style = fields.Str(
+        validate=validate.OneOf([
+            'modern', 'classic', 'elegant', 'bold', 
+            'friendly', 'professional', 'creative'
+        ]),
+        missing='modern',
+        error_messages={'invalid': 'Must be a supported style'}
+    )
+    
+    category = fields.Str(
+        validate=validate.OneOf(['sans-serif', 'serif', 'display', 'any']),
+        missing='sans-serif',
+        error_messages={'invalid': 'Must be a supported category'}
+    )
+    
+    content_type = fields.Str(
+        validate=validate.OneOf([
+            'business', 'personal', 'marketing', 'educational', 
+            'creative', 'technical', 'social'
+        ]),
+        missing='business',
+        error_messages={'invalid': 'Must be a supported content type'}
     )
 
 class CarouselResponseSchema(Schema):
@@ -247,3 +359,91 @@ class CarouselResponseSchema(Schema):
         values=fields.Raw(),
         missing=dict
     )
+
+class FontResponseSchema(Schema):
+    """Schema for font-related responses"""
+    
+    success = fields.Bool(required=True)
+    message = fields.Str(required=True)
+    
+    data = fields.Dict(
+        keys=fields.Str(),
+        values=fields.Raw()
+    )
+    
+    timestamp = fields.Str()
+
+class FontValidationSchema(Schema):
+    """Schema for validating font configurations"""
+    
+    @staticmethod
+    def validate_font_availability(font_family: str, font_weight: str = '400') -> bool:
+        """
+        Validate if a font family and weight combination is available
+        
+        Args:
+            font_family: Font family name
+            font_weight: Font weight
+            
+        Returns:
+            True if available, False otherwise
+        """
+        
+        # List of commonly available Google Fonts
+        available_fonts = {
+            'Inter': ['100', '200', '300', '400', '500', '600', '700', '800', '900'],
+            'Roboto': ['100', '300', '400', '500', '700', '900'],
+            'Open Sans': ['300', '400', '500', '600', '700', '800'],
+            'Lato': ['100', '300', '400', '700', '900'],
+            'Montserrat': ['100', '200', '300', '400', '500', '600', '700', '800', '900'],
+            'Poppins': ['100', '200', '300', '400', '500', '600', '700', '800', '900'],
+            'Source Sans Pro': ['200', '300', '400', '600', '700', '900'],
+            'Nunito': ['200', '300', '400', '500', '600', '700', '800', '900'],
+            'Raleway': ['100', '200', '300', '400', '500', '600', '700', '800', '900'],
+            'Playfair Display': ['400', '500', '600', '700', '800', '900'],
+            'Merriweather': ['300', '400', '700', '900'],
+            'Lora': ['400', '500', '600', '700'],
+            'Oswald': ['200', '300', '400', '500', '600', '700'],
+            'PT Sans': ['400', '700'],
+            'Ubuntu': ['300', '400', '500', '700']
+        }
+        
+        if font_family not in available_fonts:
+            return False
+        
+        return font_weight in available_fonts[font_family]
+    
+    @staticmethod
+    def get_font_suggestions(platform: str, style: str) -> list:
+        """
+        Get font suggestions based on platform and style
+        
+        Args:
+            platform: Target platform
+            style: Desired style
+            
+        Returns:
+            List of suggested font families
+        """
+        
+        suggestions = {
+            'instagram_post': {
+                'modern': ['Inter', 'Poppins', 'Montserrat'],
+                'classic': ['Lato', 'Open Sans', 'Source Sans Pro'],
+                'bold': ['Oswald', 'Raleway', 'Nunito'],
+                'elegant': ['Playfair Display', 'Lora', 'Crimson Text']
+            },
+            'linkedin': {
+                'professional': ['Inter', 'Source Sans Pro', 'Lato'],
+                'modern': ['Roboto', 'Open Sans', 'Nunito'],
+                'classic': ['Merriweather', 'PT Sans', 'Ubuntu']
+            },
+            'tiktok': {
+                'bold': ['Oswald', 'Bebas Neue', 'Anton'],
+                'friendly': ['Poppins', 'Nunito', 'Raleway'],
+                'modern': ['Inter', 'Montserrat', 'Open Sans']
+            }
+        }
+        
+        platform_suggestions = suggestions.get(platform, {})
+        return platform_suggestions.get(style, ['Inter', 'Roboto', 'Open Sans'])
