@@ -5,6 +5,7 @@ Common validation functions and decorators for API endpoints
 
 import functools
 import logging
+import time  # ИСПРАВЛЕНО: добавлен отсутствующий импорт
 from typing import Any, Dict, Optional
 from flask import request, current_app
 from marshmallow import ValidationError
@@ -87,10 +88,11 @@ def validate_rate_limit(requests_per_minute: int = 60):
             current_time = int(time.time() / 60)  # Current minute
             
             # Clean old entries
-            request_counts[client_ip] = {
-                k: v for k, v in request_counts.get(client_ip, {}).items()
-                if k >= current_time - 1
-            }
+            if client_ip in request_counts:
+                request_counts[client_ip] = {
+                    k: v for k, v in request_counts[client_ip].items()
+                    if k >= current_time - 1
+                }
             
             # Count requests in current minute
             current_requests = request_counts.get(client_ip, {}).get(current_time, 0)
@@ -270,6 +272,134 @@ def validate_platform_compatibility(config: Dict[str, Any], platform: str) -> Di
     
     return results
 
+def validate_font_configuration(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate font configuration for Google Fonts compatibility
+    
+    Args:
+        config: Configuration dictionary with font settings
+        
+    Returns:
+        Dictionary with validation results
+    """
+    
+    results = {
+        'valid': True,
+        'warnings': [],
+        'suggestions': []
+    }
+    
+    font_family = config.get('font_family', 'Inter')
+    font_weight = config.get('font_weight', '400')
+    title_font_weight = config.get('title_font_weight', '600')
+    
+    # Check if font family is in popular fonts list
+    popular_fonts = current_app.config.get('POPULAR_FONTS', {})
+    all_popular = []
+    for category in popular_fonts.values():
+        all_popular.extend([font['family'] for font in category])
+    
+    if font_family not in all_popular:
+        results['warnings'].append(f'Font "{font_family}" may not be available. Consider using a popular alternative.')
+        results['suggestions'].append('Use fonts from the recommended list for better compatibility')
+    
+    # Check weight availability
+    valid_weights = ['100', '200', '300', '400', '500', '600', '700', '800', '900']
+    
+    if font_weight not in valid_weights:
+        results['valid'] = False
+        results['warnings'].append(f'Invalid font weight: {font_weight}')
+    
+    if title_font_weight not in valid_weights:
+        results['valid'] = False
+        results['warnings'].append(f'Invalid title font weight: {title_font_weight}')
+    
+    # Font size validation
+    font_size = config.get('font_size', 44)
+    title_font_size = config.get('title_font_size', 56)
+    
+    if font_size < 12 or font_size > 200:
+        results['warnings'].append('Font size should be between 12 and 200 pixels for optimal readability')
+    
+    if title_font_size <= font_size:
+        results['suggestions'].append('Title font size should be larger than body font size for hierarchy')
+    
+    return results
+
+def validate_google_fonts_api_key(api_key: str) -> bool:
+    """
+    Validate Google Fonts API key format
+    
+    Args:
+        api_key: Google Fonts API key
+        
+    Returns:
+        True if format is valid, False otherwise
+    """
+    
+    if not api_key or not isinstance(api_key, str):
+        return False
+    
+    # Google API keys typically have a specific format
+    # This is a basic validation - adjust based on actual requirements
+    if len(api_key) < 20 or len(api_key) > 50:
+        return False
+    
+    # Check for valid characters (alphanumeric, hyphens, underscores)
+    import re
+    if not re.match(r'^[A-Za-z0-9_-]+$', api_key):
+        return False
+    
+    return True
+
+def validate_file_upload(file_data: bytes, allowed_types: list = None, max_size: int = None) -> Dict[str, Any]:
+    """
+    Validate uploaded file data
+    
+    Args:
+        file_data: File content as bytes
+        allowed_types: List of allowed MIME types
+        max_size: Maximum file size in bytes
+        
+    Returns:
+        Dictionary with validation results
+    """
+    
+    if allowed_types is None:
+        allowed_types = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif']
+    
+    if max_size is None:
+        max_size = current_app.config.get('MAX_IMAGE_SIZE', 10 * 1024 * 1024)  # 10MB
+    
+    results = {
+        'valid': True,
+        'warnings': [],
+        'file_info': {}
+    }
+    
+    # Check file size
+    file_size = len(file_data)
+    results['file_info']['size'] = file_size
+    
+    if file_size > max_size:
+        results['valid'] = False
+        results['warnings'].append(f'File too large: {file_size} bytes. Maximum: {max_size} bytes')
+    
+    # Detect file type
+    try:
+        import magic
+        file_type = magic.from_buffer(file_data, mime=True)
+        results['file_info']['type'] = file_type
+        
+        if file_type not in allowed_types:
+            results['valid'] = False
+            results['warnings'].append(f'Invalid file type: {file_type}. Allowed: {allowed_types}')
+    except ImportError:
+        logger.warning('python-magic not available for file type detection')
+        results['warnings'].append('File type validation skipped')
+    
+    return results
+
 def _is_valid_api_key(api_key: str) -> bool:
     """
     Validate API key format and authenticity
@@ -351,3 +481,72 @@ def _is_light_color(color: str) -> bool:
         
     except Exception:
         return True  # Default to light if calculation fails
+
+def validate_batch_request(batch_data: list, max_items: int = 10) -> Dict[str, Any]:
+    """
+    Validate batch request data
+    
+    Args:
+        batch_data: List of items to process in batch
+        max_items: Maximum number of items allowed in batch
+        
+    Returns:
+        Dictionary with validation results
+    """
+    
+    results = {
+        'valid': True,
+        'warnings': [],
+        'item_count': len(batch_data)
+    }
+    
+    if len(batch_data) == 0:
+        results['valid'] = False
+        results['warnings'].append('Batch cannot be empty')
+    
+    if len(batch_data) > max_items:
+        results['valid'] = False
+        results['warnings'].append(f'Too many items in batch: {len(batch_data)}. Maximum: {max_items}')
+    
+    # Validate each item has required fields
+    for i, item in enumerate(batch_data):
+        if not isinstance(item, dict):
+            results['valid'] = False
+            results['warnings'].append(f'Item {i} is not a valid object')
+            continue
+        
+        if 'text' not in item:
+            results['valid'] = False
+            results['warnings'].append(f'Item {i} missing required "text" field')
+    
+    return results
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename for safe file operations
+    
+    Args:
+        filename: Original filename
+        
+    Returns:
+        Sanitized filename
+    """
+    
+    import re
+    
+    # Remove or replace dangerous characters
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    
+    # Remove leading/trailing whitespace and dots
+    filename = filename.strip('. ')
+    
+    # Limit length
+    if len(filename) > 255:
+        name, ext = filename.rsplit('.', 1) if '.' in filename else (filename, '')
+        filename = name[:250] + ('.' + ext if ext else '')
+    
+    # Ensure filename is not empty
+    if not filename:
+        filename = 'unnamed_file'
+    
+    return filename
