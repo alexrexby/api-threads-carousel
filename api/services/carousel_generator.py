@@ -1,569 +1,789 @@
 """
-AI Configuration Generator Service
-Service for generating carousel configurations using OpenAI
+Carousel Generator Service
+Core service for generating carousel images using Pillow with Google Fonts support
 """
 
 import logging
-import json
+import io
 import re
-from typing import Dict, Any, Optional
+import textwrap
+import os
+import requests
+from typing import List, Dict, Any, Tuple, Optional
+from PIL import Image, ImageDraw, ImageFont, ImageColor
 from flask import current_app
-import openai
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-class AIConfigGeneratorService:
+class CarouselGeneratorService:
     """
-    Service for generating carousel design configurations using AI
+    Service class for generating carousel images from text and configuration
     """
     
     def __init__(self):
-        self.client = None
-        self._initialize_openai()
-    
-    def _initialize_openai(self):
-        """Initialize OpenAI client with API key"""
+        self.fonts_cache = {}  # Кэш для загруженных шрифтов
+        self.google_fonts_api_key = current_app.config.get('GOOGLE_FONTS_API_KEY')
+        self.fonts_dir = os.path.join(os.getcwd(), 'fonts')
+        self._ensure_fonts_directory()
         
-        api_key = current_app.config.get('OPENAI_API_KEY')
-        if api_key:
+    def _ensure_fonts_directory(self):
+        """Создать директорию для шрифтов если её нет"""
+        if not os.path.exists(self.fonts_dir):
+            os.makedirs(self.fonts_dir)
+            logger.info(f"Created fonts directory: {self.fonts_dir}")
+    
+    def generate_carousel(self, text: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate carousel images from text content
+        
+        Args:
+            text: Text content with slide separators
+            config: Configuration dictionary for styling
+            
+        Returns:
+            Dictionary containing generated slides and metadata
+        """
+        
+        try:
+            # Parse text into slides
+            slides_text = self._parse_slides(text, config)
+            
+            if not slides_text:
+                raise ValueError("No valid slides found in text")
+            
+            # Validate slide count
+            if len(slides_text) > current_app.config.get('MAX_SLIDES', 20):
+                raise ValueError(f"Too many slides. Maximum is {current_app.config.get('MAX_SLIDES', 20)}")
+            
+            # Get image dimensions based on platform
+            width, height = self._get_image_dimensions(config)
+            
+            # Подготовить шрифты
+            self._prepare_fonts(config)
+            
+            # Generate images for each slide
+            slides_data = []
+            
+            for i, slide_text in enumerate(slides_text):
+                logger.debug(f"Generating slide {i + 1}/{len(slides_text)}")
+                
+                # Create slide image
+                image_bytes = self._create_slide_image(
+                    text=slide_text,
+                    config=config,
+                    width=width,
+                    height=height,
+                    slide_number=i + 1,
+                    total_slides=len(slides_text)
+                )
+                
+                slides_data.append({
+                    'text': slide_text,
+                    'image_bytes': image_bytes,
+                    'width': width,
+                    'height': height,
+                    'slide_number': i + 1
+                })
+            
+            result = {
+                'total_slides': len(slides_text),
+                'slides': slides_data,
+                'config_used': config,
+                'dimensions': {'width': width, 'height': height}
+            }
+            
+            logger.info(f"Successfully generated {len(slides_text)} carousel slides")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error generating carousel: {str(e)}")
+            raise
+    
+    def _prepare_fonts(self, config: Dict[str, Any]):
+        """
+        Подготовить шрифты для использования (загрузить Google Fonts если нужно)
+        
+        Args:
+            config: Configuration dictionary
+        """
+        
+        font_family = config.get('font_family', 'Inter')
+        font_weight = config.get('font_weight', '400')
+        
+        # Проверить, есть ли шрифт в кэше
+        font_key = f"{font_family}-{font_weight}"
+        
+        if font_key not in self.fonts_cache:
+            font_path = self._get_google_font(font_family, font_weight)
+            if font_path:
+                self.fonts_cache[font_key] = font_path
+                logger.info(f"Loaded Google Font: {font_family} {font_weight}")
+            else:
+                # Fallback к системному шрифту
+                self.fonts_cache[font_key] = self._get_fallback_font_path()
+                logger.warning(f"Using fallback font for {font_family}")
+    
+    def _get_google_font(self, family: str, weight: str = '400') -> Optional[str]:
+        """
+        Загрузить Google Font и вернуть путь к файлу
+        
+        Args:
+            family: Название семейства шрифта (например, 'Inter', 'Roboto')
+            weight: Вес шрифта ('300', '400', '500', '600', '700')
+            
+        Returns:
+            Путь к файлу шрифта или None если загрузка не удалась
+        """
+        
+        try:
+            # Проверить, есть ли уже загруженный шрифт
+            font_filename = f"{family.replace(' ', '')}-{weight}.ttf"
+            font_path = os.path.join(self.fonts_dir, font_filename)
+            
+            if os.path.exists(font_path):
+                return font_path
+            
+            # Получить URL для загрузки шрифта
+            download_url = self._get_font_download_url(family, weight)
+            
+            if download_url:
+                # Загрузить шрифт
+                response = requests.get(download_url, timeout=30)
+                response.raise_for_status()
+                
+                # Сохранить в файл
+                with open(font_path, 'wb') as f:
+                    f.write(response.content)
+                
+                logger.info(f"Downloaded Google Font: {family} {weight}")
+                return font_path
+            
+        except Exception as e:
+            logger.error(f"Failed to download Google Font {family} {weight}: {e}")
+        
+        return None
+    
+    def _get_font_download_url(self, family: str, weight: str) -> Optional[str]:
+        """
+        Получить URL для загрузки Google Font
+        
+        Args:
+            family: Название семейства шрифта
+            weight: Вес шрифта
+            
+        Returns:
+            URL для загрузки или None
+        """
+        
+        try:
+            # Использовать Google Fonts API для получения URL
+            if self.google_fonts_api_key:
+                api_url = f"https://www.googleapis.com/webfonts/v1/webfonts"
+                params = {'key': self.google_fonts_api_key, 'family': family}
+                
+                response = requests.get(api_url, params=params, timeout=10)
+                response.raise_for_status()
+                
+                data = response.json()
+                if 'items' in data and len(data['items']) > 0:
+                    font_data = data['items'][0]
+                    if 'files' in font_data and weight in font_data['files']:
+                        return font_data['files'][weight]
+            
+            # Fallback: использовать прямые ссылки Google Fonts CSS API
+            css_url = f"https://fonts.googleapis.com/css2?family={family.replace(' ', '+')}:wght@{weight}&display=swap"
+            
+            response = requests.get(css_url, timeout=10)
+            response.raise_for_status()
+            
+            # Парсить CSS для получения URL .ttf файла
+            css_content = response.text
+            
+            # Найти URL в CSS (упрощенный парсинг)
+            import re
+            url_match = re.search(r'url\((https://[^)]+\.ttf)\)', css_content)
+            if url_match:
+                return url_match.group(1)
+                
+        except Exception as e:
+            logger.error(f"Failed to get font download URL for {family}: {e}")
+        
+        return None
+    
+    def _parse_slides(self, text: str, config: Dict[str, Any]) -> List[str]:
+        """
+        Parse text into individual slides using separators
+        
+        Args:
+            text: Raw text content
+            config: Configuration dictionary
+            
+        Returns:
+            List of slide text content
+        """
+        
+        separator = config.get('slide_separator', current_app.config.get('SLIDE_SEPARATOR', '========'))
+        
+        # Split by separator and clean up
+        slides = [slide.strip() for slide in text.split(separator)]
+        
+        # Remove empty slides
+        slides = [slide for slide in slides if slide]
+        
+        # If no separators found and text is long, try to auto-split
+        if len(slides) == 1 and len(text) > 1000:
+            slides = self._auto_split_text(text)
+        
+        return slides
+    
+    def _auto_split_text(self, text: str) -> List[str]:
+        """
+        Automatically split long text into slides
+        
+        Args:
+            text: Long text content
+            
+        Returns:
+            List of slide texts
+        """
+        
+        # Split by paragraphs first
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        
+        slides = []
+        current_slide = ""
+        max_chars_per_slide = 800
+        
+        for paragraph in paragraphs:
+            if len(current_slide + paragraph) < max_chars_per_slide:
+                current_slide += "\n\n" + paragraph if current_slide else paragraph
+            else:
+                if current_slide:
+                    slides.append(current_slide.strip())
+                current_slide = paragraph
+        
+        if current_slide:
+            slides.append(current_slide.strip())
+        
+        return slides
+    
+    def _get_image_dimensions(self, config: Dict[str, Any]) -> Tuple[int, int]:
+        """
+        Get image dimensions based on platform or custom settings
+        
+        Args:
+            config: Configuration dictionary
+            
+        Returns:
+            Tuple of (width, height)
+        """
+        
+        # Check for custom dimensions first
+        if config.get('custom_width') and config.get('custom_height'):
+            return config['custom_width'], config['custom_height']
+        
+        # Get platform specifications
+        platform = config.get('platform', 'instagram_post')
+        platform_specs = current_app.config.get('PLATFORM_SPECS', {})
+        
+        if platform in platform_specs:
+            specs = platform_specs[platform]
+            return specs['width'], specs['height']
+        
+        # Fallback to default
+        return (
+            current_app.config.get('DEFAULT_IMAGE_WIDTH', 1080),
+            current_app.config.get('DEFAULT_IMAGE_HEIGHT', 1080)
+        )
+    
+    def _create_slide_image(
+        self, 
+        text: str, 
+        config: Dict[str, Any], 
+        width: int, 
+        height: int,
+        slide_number: int,
+        total_slides: int
+    ) -> bytes:
+        """
+        Create a single slide image
+        
+        Args:
+            text: Text content for the slide
+            config: Styling configuration
+            width: Image width
+            height: Image height
+            slide_number: Current slide number
+            total_slides: Total number of slides
+            
+        Returns:
+            Image bytes (PNG format)
+        """
+        
+        # Create image with background color
+        bg_color = config.get('background_color', '#ffffff')
+        image = Image.new('RGB', (width, height), ImageColor.getrgb(bg_color))
+        draw = ImageDraw.Draw(image)
+        
+        # Apply corner radius if specified
+        corner_radius = config.get('corner_radius', 0)
+        if corner_radius > 0:
+            image = self._apply_corner_radius(image, corner_radius)
+            draw = ImageDraw.Draw(image)
+        
+        # Get fonts
+        font_size = config.get('font_size', 44)
+        title_font_size = config.get('title_font_size', 56)
+        
+        regular_font = self._get_font(font_size, config)
+        title_font = self._get_font(title_font_size, config)
+        
+        # Parse text content (titles vs regular text)
+        parsed_content = self._parse_slide_content(text)
+        
+        # Calculate layout
+        padding = config.get('padding', 80)
+        content_width = width - (2 * padding)
+        content_height = height - (2 * padding)
+        
+        # Render content
+        y_position = padding
+        text_color = ImageColor.getrgb(config.get('text_color', '#000000'))
+        line_spacing = config.get('line_spacing', 1.2)
+        text_align = config.get('text_align', 'left')
+        
+        for content_item in parsed_content:
+            if content_item['type'] == 'title':
+                y_position = self._draw_text_block(
+                    draw=draw,
+                    text=content_item['text'],
+                    font=title_font,
+                    color=text_color,
+                    x=padding,
+                    y=y_position,
+                    max_width=content_width,
+                    line_spacing=line_spacing,
+                    align=text_align
+                )
+                y_position += 30  # Extra spacing after titles
+                
+            elif content_item['type'] == 'text':
+                y_position = self._draw_text_block(
+                    draw=draw,
+                    text=content_item['text'],
+                    font=regular_font,
+                    color=text_color,
+                    x=padding,
+                    y=y_position,
+                    max_width=content_width,
+                    line_spacing=line_spacing,
+                    align=text_align
+                )
+                y_position += 20  # Normal spacing
+        
+        # Add page numbers if enabled
+        if config.get('add_page_numbers', False):
+            self._add_page_numbers(
+                draw=draw,
+                slide_number=slide_number,
+                total_slides=total_slides,
+                width=width,
+                height=height,
+                font=regular_font,
+                color=text_color
+            )
+        
+        # Add logo text if enabled
+        if config.get('add_logo_text', False) and config.get('logo_text'):
+            self._add_logo_text(
+                draw=draw,
+                logo_text=config['logo_text'],
+                width=width,
+                height=height,
+                font=regular_font,
+                color=text_color
+            )
+        
+        # Convert to bytes
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format='PNG', quality=95, optimize=True)
+        img_byte_arr = img_byte_arr.getvalue()
+        
+        return img_byte_arr
+    
+    def _parse_slide_content(self, text: str) -> List[Dict[str, str]]:
+        """
+        Parse slide text into structured content (titles, text, etc.)
+        
+        Args:
+            text: Raw slide text
+            
+        Returns:
+            List of content items with type and text
+        """
+        
+        content_items = []
+        lines = text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Check if line is a title (marked with ** or #)
+            if line.startswith('**') and line.endswith('**'):
+                # Bold markdown style title
+                title_text = line[2:-2].strip()
+                content_items.append({'type': 'title', 'text': title_text})
+                
+            elif line.startswith('#'):
+                # Markdown header style title
+                title_text = line.lstrip('#').strip()
+                content_items.append({'type': 'title', 'text': title_text})
+                
+            elif line.isupper() and len(line) < 50:
+                # All caps short text as title
+                content_items.append({'type': 'title', 'text': line})
+                
+            else:
+                # Regular text
+                content_items.append({'type': 'text', 'text': line})
+        
+        return content_items
+    
+    def _draw_text_block(
+        self,
+        draw: ImageDraw.Draw,
+        text: str,
+        font: ImageFont.FreeTypeFont,
+        color: Tuple[int, int, int],
+        x: int,
+        y: int,
+        max_width: int,
+        line_spacing: float = 1.2,
+        align: str = 'left'
+    ) -> int:
+        """
+        Draw a block of text with proper wrapping and alignment
+        
+        Args:
+            draw: ImageDraw object
+            text: Text to draw
+            font: Font to use
+            color: Text color
+            x: X position
+            y: Y position
+            max_width: Maximum width for text wrapping
+            line_spacing: Line spacing multiplier
+            align: Text alignment (left, center, right)
+            
+        Returns:
+            Y position after drawing (for next element)
+        """
+        
+        # Wrap text to fit width
+        wrapped_lines = self._wrap_text(text, font, max_width)
+        
+        current_y = y
+        
+        for line in wrapped_lines:
+            # Calculate line width for alignment
+            line_bbox = draw.textbbox((0, 0), line, font=font)
+            line_width = line_bbox[2] - line_bbox[0]
+            line_height = line_bbox[3] - line_bbox[1]
+            
+            # Calculate x position based on alignment
+            if align == 'center':
+                line_x = x + (max_width - line_width) // 2
+            elif align == 'right':
+                line_x = x + max_width - line_width
+            else:  # left
+                line_x = x
+            
+            # Draw the line
+            draw.text((line_x, current_y), line, font=font, fill=color)
+            
+            # Move to next line
+            current_y += int(line_height * line_spacing)
+        
+        return current_y
+    
+    def _wrap_text(self, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+        """
+        Wrap text to fit within specified width
+        
+        Args:
+            text: Text to wrap
+            font: Font being used
+            max_width: Maximum width in pixels
+            
+        Returns:
+            List of wrapped text lines
+        """
+        
+        words = text.split()
+        lines = []
+        current_line = ""
+        
+        for word in words:
+            # Test adding this word to current line
+            test_line = f"{current_line} {word}".strip()
+            
+            # Get text width
+            bbox = font.getbbox(test_line)
+            text_width = bbox[2] - bbox[0]
+            
+            if text_width <= max_width:
+                current_line = test_line
+            else:
+                # Current line is full, start new line
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+                
+                # Check if single word is too long
+                word_bbox = font.getbbox(word)
+                word_width = word_bbox[2] - word_bbox[0]
+                
+                if word_width > max_width:
+                    # Word is too long, need to break it
+                    lines.extend(self._break_long_word(word, font, max_width))
+                    current_line = ""
+        
+        if current_line:
+            lines.append(current_line)
+        
+        return lines
+    
+    def _break_long_word(self, word: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+        """
+        Break a long word that doesn't fit on one line
+        
+        Args:
+            word: Word to break
+            font: Font being used
+            max_width: Maximum width in pixels
+            
+        Returns:
+            List of word parts
+        """
+        
+        parts = []
+        current_part = ""
+        
+        for char in word:
+            test_part = current_part + char
+            bbox = font.getbbox(test_part)
+            width = bbox[2] - bbox[0]
+            
+            if width <= max_width:
+                current_part = test_part
+            else:
+                if current_part:
+                    parts.append(current_part)
+                current_part = char
+        
+        if current_part:
+            parts.append(current_part)
+        
+        return parts
+    
+    def _add_page_numbers(
+        self,
+        draw: ImageDraw.Draw,
+        slide_number: int,
+        total_slides: int,
+        width: int,
+        height: int,
+        font: ImageFont.FreeTypeFont,
+        color: Tuple[int, int, int]
+    ):
+        """Add page numbers to the slide"""
+        
+        page_text = f"{slide_number}/{total_slides}"
+        
+        # Get text dimensions
+        bbox = draw.textbbox((0, 0), page_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        # Position at bottom right
+        x = width - text_width - 20
+        y = height - text_height - 20
+        
+        draw.text((x, y), page_text, font=font, fill=color)
+    
+    def _add_logo_text(
+        self,
+        draw: ImageDraw.Draw,
+        logo_text: str,
+        width: int,
+        height: int,
+        font: ImageFont.FreeTypeFont,
+        color: Tuple[int, int, int]
+    ):
+        """Add logo text to the slide"""
+        
+        # Get text dimensions
+        bbox = draw.textbbox((0, 0), logo_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        # Position at bottom left
+        x = 20
+        y = height - text_height - 20
+        
+        draw.text((x, y), logo_text, font=font, fill=color)
+    
+    def _apply_corner_radius(self, image: Image.Image, radius: int) -> Image.Image:
+        """
+        Apply corner radius to image
+        
+        Args:
+            image: PIL Image
+            radius: Corner radius in pixels
+            
+        Returns:
+            Image with rounded corners
+        """
+        
+        # Create a mask with rounded corners
+        mask = Image.new('L', image.size, 0)
+        mask_draw = ImageDraw.Draw(mask)
+        
+        # Draw rounded rectangle on mask
+        mask_draw.rounded_rectangle(
+            [(0, 0), image.size],
+            radius=radius,
+            fill=255
+        )
+        
+        # Apply mask to image
+        image.putalpha(mask)
+        
+        return image
+    
+    def _get_font(self, size: int, config: Dict[str, Any]) -> ImageFont.FreeTypeFont:
+        """
+        Get font object with specified size using Google Fonts
+        
+        Args:
+            size: Font size in pixels
+            config: Configuration dictionary containing font settings
+            
+        Returns:
+            PIL Font object
+        """
+        
+        font_family = config.get('font_family', 'Inter')
+        font_weight = config.get('font_weight', '400')
+        font_key = f"{font_family}-{font_weight}"
+        
+        # Получить путь к шрифту из кэша
+        font_path = self.fonts_cache.get(font_key)
+        
+        if font_path and os.path.exists(font_path):
             try:
-                self.client = openai.OpenAI(api_key=api_key)
-                logger.info("OpenAI client initialized successfully")
+                return ImageFont.truetype(font_path, size)
             except Exception as e:
-                logger.error(f"Failed to initialize OpenAI client: {e}")
-                self.client = None
-        else:
-            logger.warning("OpenAI API key not configured")
+                logger.warning(f"Failed to load cached font {font_path}: {e}")
+        
+        # Fallback к системному шрифту
+        fallback_path = self._get_fallback_font_path()
+        if fallback_path:
+            try:
+                return ImageFont.truetype(fallback_path, size)
+            except Exception:
+                pass
+        
+        # Последний fallback - шрифт по умолчанию PIL
+        logger.warning("Using PIL default font")
+        return ImageFont.load_default()
     
-    def generate_config(
-        self,
-        description: str,
-        platform: str = 'instagram_post',
-        additional_requirements: str = '',
-        brand_colors: Optional[list] = None
-    ) -> Dict[str, Any]:
-        """
-        Generate carousel configuration based on description
+    def _get_fallback_font_path(self) -> str:
+        """Get path to fallback system font file"""
         
-        Args:
-            description: Style description from user
-            platform: Target social media platform
-            additional_requirements: Additional styling requirements
-            brand_colors: Optional list of brand colors
-            
-        Returns:
-            Dictionary with generated config and explanation
-        """
-        
-        if not self.client:
-            raise Exception("OpenAI client not available")
-        
-        try:
-            # Get platform specifications
-            platform_specs = current_app.config.get('PLATFORM_SPECS', {}).get(platform, {})
-            
-            # Prepare the prompt
-            prompt = self._build_prompt(
-                description=description,
-                platform=platform,
-                platform_specs=platform_specs,
-                additional_requirements=additional_requirements,
-                brand_colors=brand_colors
-            )
-            
-            # Call OpenAI API
-            response = self.client.chat.completions.create(
-                model=current_app.config.get('OPENAI_MODEL', 'gpt-3.5-turbo'),
-                messages=[
-                    {
-                        "role": "system",
-                        "content": self._get_system_prompt()
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=current_app.config.get('OPENAI_MAX_TOKENS', 1000),
-                temperature=0.7,
-                response_format={"type": "json_object"}
-            )
-            
-            # Parse response
-            response_content = response.choices[0].message.content
-            result = json.loads(response_content)
-            
-            # Validate and sanitize the generated config
-            config = self._validate_and_sanitize_config(result.get('config', {}), platform_specs)
-            
-            return {
-                'config': config,
-                'explanation': result.get('explanation', 'AI-generated configuration'),
-                'platform': platform,
-                'prompt_used': description
-            }
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse AI response as JSON: {e}")
-            return self._get_fallback_config(description, platform)
-            
-        except Exception as e:
-            logger.error(f"Error generating AI config: {e}")
-            return self._get_fallback_config(description, platform)
-    
-    def _get_system_prompt(self) -> str:
-        """Get the system prompt for AI configuration generation"""
-        
-        return """You are an expert graphic designer specializing in social media carousel design. 
-        Your task is to generate optimal design configurations based on user descriptions.
-        
-        You must respond with valid JSON containing:
-        1. "config" - the design configuration object
-        2. "explanation" - brief explanation of design choices
-        
-        Design principles to follow:
-        - Ensure good contrast between text and background colors
-        - Choose font sizes appropriate for the platform and readability
-        - Consider modern design trends and user preferences
-        - Ensure accessibility with sufficient color contrast
-        - Adapt to platform-specific requirements
-        
-        Available configuration options:
-        - background_color: hex color (e.g., "#ffffff")
-        - text_color: hex color (e.g., "#000000") 
-        - font_size: integer 8-200
-        - title_font_size: integer 8-300
-        - padding: integer 0-500 (pixels)
-        - corner_radius: integer 0-100 (pixels)
-        - line_spacing: float 0.5-3.0
-        - text_align: "left", "center", or "right"
-        - add_page_numbers: boolean
-        - add_logo_text: boolean
-        - logo_text: string (if add_logo_text is true)
-        
-        Respond only with valid JSON."""
-    
-    def _build_prompt(
-        self,
-        description: str,
-        platform: str,
-        platform_specs: Dict[str, Any],
-        additional_requirements: str,
-        brand_colors: Optional[list]
-    ) -> str:
-        """Build the user prompt for AI generation"""
-        
-        prompt_parts = [
-            f"Generate a carousel design configuration for {platform}.",
-            f"Platform dimensions: {platform_specs.get('width', 1080)}x{platform_specs.get('height', 1080)} pixels.",
-            f"Style description: {description}",
+        # Try common system font paths
+        font_paths = [
+            # Ubuntu/Debian
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+            # CentOS/RHEL
+            '/usr/share/fonts/liberation/LiberationSans-Regular.ttf',
+            # macOS
+            '/System/Library/Fonts/Arial.ttf',
+            '/System/Library/Fonts/Helvetica.ttc',
+            # Windows
+            'C:/Windows/Fonts/arial.ttf',
+            'C:/Windows/Fonts/calibri.ttf',
+            # Local fonts directory
+            'fonts/DejaVuSans.ttf',
+            'fonts/arial.ttf'
         ]
         
-        if additional_requirements:
-            prompt_parts.append(f"Additional requirements: {additional_requirements}")
+        for path in font_paths:
+            if os.path.exists(path):
+                try:
+                    ImageFont.truetype(path, 20)  # Test load
+                    return path
+                except Exception:
+                    continue
         
-        if brand_colors:
-            colors_str = ", ".join(brand_colors)
-            prompt_parts.append(f"Consider these brand colors: {colors_str}")
-        
-        # Add platform-specific guidance
-        platform_guidance = {
-            'instagram_post': 'Design for Instagram feed posts - clean, modern, eye-catching',
-            'instagram_story': 'Design for Instagram stories - vertical format, bold and engaging',
-            'linkedin': 'Design for LinkedIn - professional, business-oriented, readable',
-            'tiktok': 'Design for TikTok - vibrant, youthful, attention-grabbing',
-            'twitter': 'Design for Twitter - concise, clear, informative',
-            'facebook': 'Design for Facebook - engaging, social, accessible'
-        }
-        
-        if platform in platform_guidance:
-            prompt_parts.append(platform_guidance[platform])
-        
-        prompt_parts.append("Generate the configuration as JSON with 'config' and 'explanation' fields.")
-        
-        return " ".join(prompt_parts)
+        logger.warning("No suitable fallback font found")
+        return ""
     
-    def _validate_and_sanitize_config(self, config: Dict[str, Any], platform_specs: Dict[str, Any]) -> Dict[str, Any]:
+    def get_available_google_fonts(self) -> List[Dict[str, Any]]:
         """
-        Validate and sanitize the AI-generated configuration
+        Получить список доступных Google Fonts
         
-        Args:
-            config: Raw configuration from AI
-            platform_specs: Platform specifications
-            
         Returns:
-            Validated and sanitized configuration
+            Список шрифтов с их характеристиками
         """
         
-        # Start with default config
-        base_config = current_app.config['DEFAULT_CONFIG'].copy()
-        
-        # Validate and apply each setting
-        validated_config = {}
-        
-        # Color validation
-        if 'background_color' in config:
-            bg_color = self._validate_hex_color(config['background_color'])
-            if bg_color:
-                validated_config['background_color'] = bg_color
-        
-        if 'text_color' in config:
-            text_color = self._validate_hex_color(config['text_color'])
-            if text_color:
-                validated_config['text_color'] = text_color
-        
-        # Font size validation
-        if 'font_size' in config:
-            font_size = self._validate_integer(config['font_size'], 8, 200)
-            if font_size:
-                validated_config['font_size'] = font_size
-        
-        if 'title_font_size' in config:
-            title_size = self._validate_integer(config['title_font_size'], 8, 300)
-            if title_size:
-                validated_config['title_font_size'] = title_size
-        
-        # Layout validation
-        if 'padding' in config:
-            padding = self._validate_integer(config['padding'], 0, 500)
-            if padding is not None:
-                validated_config['padding'] = padding
-        
-        if 'corner_radius' in config:
-            radius = self._validate_integer(config['corner_radius'], 0, 100)
-            if radius is not None:
-                validated_config['corner_radius'] = radius
-        
-        if 'line_spacing' in config:
-            spacing = self._validate_float(config['line_spacing'], 0.5, 3.0)
-            if spacing:
-                validated_config['line_spacing'] = spacing
-        
-        # Text alignment validation
-        if 'text_align' in config:
-            align = config['text_align']
-            if align in ['left', 'center', 'right']:
-                validated_config['text_align'] = align
-        
-        # Boolean settings
-        for bool_setting in ['add_page_numbers', 'add_logo_text']:
-            if bool_setting in config:
-                if isinstance(config[bool_setting], bool):
-                    validated_config[bool_setting] = config[bool_setting]
-        
-        # Logo text
-        if 'logo_text' in config and isinstance(config['logo_text'], str):
-            validated_config['logo_text'] = config['logo_text'][:50]  # Limit length
-        
-        # Ensure contrast between text and background
-        if 'background_color' in validated_config and 'text_color' in validated_config:
-            if not self._has_sufficient_contrast(
-                validated_config['background_color'], 
-                validated_config['text_color']
-            ):
-                # Adjust text color for better contrast
-                if validated_config['background_color'].lower() in ['#ffffff', '#fff']:
-                    validated_config['text_color'] = '#000000'
-                else:
-                    validated_config['text_color'] = '#ffffff'
-        
-        # Merge with base config
-        final_config = {**base_config, **validated_config}
-        
-        return final_config
-    
-    def _validate_hex_color(self, color: str) -> Optional[str]:
-        """
-        Validate hex color format
-        
-        Args:
-            color: Color string to validate
-            
-        Returns:
-            Valid hex color or None
-        """
-        
-        if not isinstance(color, str):
-            return None
-        
-        # Remove whitespace and ensure # prefix
-        color = color.strip()
-        if not color.startswith('#'):
-            color = '#' + color
-        
-        # Validate hex format - ИСПРАВЛЕНО: добавлен закрывающий $
-        if re.match(r'^#[0-9A-Fa-f]{6}$', color):
-            return color.upper()
-        
-        return None
-    
-    def _validate_integer(self, value: Any, min_val: int, max_val: int) -> Optional[int]:
-        """
-        Validate integer within range
-        
-        Args:
-            value: Value to validate
-            min_val: Minimum allowed value
-            max_val: Maximum allowed value
-            
-        Returns:
-            Valid integer or None
-        """
+        if not self.google_fonts_api_key:
+            return self._get_popular_fonts_list()
         
         try:
-            int_val = int(value)
-            if min_val <= int_val <= max_val:
-                return int_val
-        except (ValueError, TypeError):
-            pass
-        
-        return None
-    
-    def _validate_float(self, value: Any, min_val: float, max_val: float) -> Optional[float]:
-        """
-        Validate float within range
-        
-        Args:
-            value: Value to validate
-            min_val: Minimum allowed value
-            max_val: Maximum allowed value
+            api_url = "https://www.googleapis.com/webfonts/v1/webfonts"
+            params = {'key': self.google_fonts_api_key, 'sort': 'popularity'}
             
-        Returns:
-            Valid float or None
-        """
-        
-        try:
-            float_val = float(value)
-            if min_val <= float_val <= max_val:
-                return float_val
-        except (ValueError, TypeError):
-            pass
-        
-        return None
-    
-    def _has_sufficient_contrast(self, bg_color: str, text_color: str) -> bool:
-        """
-        Check if colors have sufficient contrast for accessibility
-        
-        Args:
-            bg_color: Background color hex
-            text_color: Text color hex
+            response = requests.get(api_url, params=params, timeout=10)
+            response.raise_for_status()
             
-        Returns:
-            True if contrast is sufficient
-        """
-        
-        try:
-            # Convert hex to RGB
-            bg_rgb = tuple(int(bg_color[i:i+2], 16) for i in (1, 3, 5))
-            text_rgb = tuple(int(text_color[i:i+2], 16) for i in (1, 3, 5))
+            data = response.json()
+            fonts_list = []
             
-            # Calculate relative luminance
-            def luminance(rgb):
-                r, g, b = [x/255.0 for x in rgb]
-                r = r/12.92 if r <= 0.03928 else ((r+0.055)/1.055)**2.4
-                g = g/12.92 if g <= 0.03928 else ((g+0.055)/1.055)**2.4
-                b = b/12.92 if b <= 0.03928 else ((b+0.055)/1.055)**2.4
-                return 0.2126*r + 0.7152*g + 0.0722*b
+            for font in data.get('items', [])[:50]:  # Ограничить до 50 популярных
+                fonts_list.append({
+                    'family': font['family'],
+                    'category': font.get('category', 'sans-serif'),
+                    'variants': font.get('variants', ['400']),
+                    'subsets': font.get('subsets', ['latin'])
+                })
             
-            l1 = luminance(bg_rgb)
-            l2 = luminance(text_rgb)
-            
-            # Calculate contrast ratio
-            contrast = (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
-            
-            # WCAG AA standard requires 4.5:1 for normal text
-            return contrast >= 4.5
-            
-        except Exception:
-            # If calculation fails, assume insufficient contrast
-            return False
-    
-    def _get_fallback_config(self, description: str, platform: str) -> Dict[str, Any]:
-        """
-        Generate fallback configuration when AI fails
-        
-        Args:
-            description: Original description
-            platform: Target platform
-            
-        Returns:
-            Fallback configuration
-        """
-        
-        logger.info("Generating fallback configuration")
-        
-        # Analyze description for keywords and generate simple config
-        description_lower = description.lower()
-        
-        # Start with default config
-        config = current_app.config['DEFAULT_CONFIG'].copy()
-        
-        # Apply platform specs
-        platform_specs = current_app.config.get('PLATFORM_SPECS', {}).get(platform, {})
-        if platform_specs:
-            config['platform'] = platform
-        
-        # Simple keyword-based styling
-        if any(word in description_lower for word in ['dark', 'black', 'night']):
-            config['background_color'] = '#1a1a1a'
-            config['text_color'] = '#ffffff'
-        elif any(word in description_lower for word in ['light', 'white', 'clean']):
-            config['background_color'] = '#ffffff'
-            config['text_color'] = '#333333'
-        elif any(word in description_lower for word in ['blue', 'corporate', 'business']):
-            config['background_color'] = '#1e3d59'
-            config['text_color'] = '#ffffff'
-        elif any(word in description_lower for word in ['red', 'urgent', 'important']):
-            config['background_color'] = '#dc3545'
-            config['text_color'] = '#ffffff'
-        elif any(word in description_lower for word in ['green', 'nature', 'eco']):
-            config['background_color'] = '#28a745'
-            config['text_color'] = '#ffffff'
-        
-        # Adjust font sizes based on platform
-        if platform == 'instagram_story':
-            config['font_size'] = 48
-            config['title_font_size'] = 64
-        elif platform == 'tiktok':
-            config['font_size'] = 46
-            config['title_font_size'] = 60
-        
-        # Add some style based on description
-        if any(word in description_lower for word in ['modern', 'minimal']):
-            config['corner_radius'] = 20
-            config['padding'] = 100
-        elif any(word in description_lower for word in ['classic', 'traditional']):
-            config['corner_radius'] = 0
-            config['padding'] = 80
-        
-        return {
-            'config': config,
-            'explanation': f'Fallback configuration based on keywords from: {description}',
-            'platform': platform,
-            'note': 'This is a fallback configuration as AI generation was not available'
-        }
-    
-    def generate_style_suggestions(self, industry: str, target_audience: str) -> Dict[str, Any]:
-        """
-        Generate style suggestions based on industry and target audience
-        
-        Args:
-            industry: Business industry
-            target_audience: Target audience description
-            
-        Returns:
-            Style suggestions and configurations
-        """
-        
-        if not self.client:
-            return self._get_fallback_suggestions(industry, target_audience)
-        
-        try:
-            prompt = f"""
-            Generate 3 different carousel design style suggestions for:
-            Industry: {industry}
-            Target Audience: {target_audience}
-            
-            For each style, provide:
-            1. Style name
-            2. Description
-            3. Configuration object
-            4. Use case recommendations
-            
-            Consider industry best practices and audience preferences.
-            """
-            
-            response = self.client.chat.completions.create(
-                model=current_app.config.get('OPENAI_MODEL', 'gpt-3.5-turbo'),
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a design consultant. Provide 3 design suggestions as JSON with an array of style objects."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=current_app.config.get('OPENAI_MAX_TOKENS', 1500),
-                temperature=0.8,
-                response_format={"type": "json_object"}
-            )
-            
-            result = json.loads(response.choices[0].message.content)
-            
-            # Validate each style configuration
-            styles = result.get('styles', [])
-            validated_styles = []
-            
-            for style in styles:
-                if 'config' in style:
-                    validated_config = self._validate_and_sanitize_config(style['config'], {})
-                    style['config'] = validated_config
-                validated_styles.append(style)
-            
-            return {
-                'success': True,
-                'styles': validated_styles,
-                'industry': industry,
-                'target_audience': target_audience
-            }
+            return fonts_list
             
         except Exception as e:
-            logger.error(f"Error generating style suggestions: {e}")
-            return self._get_fallback_suggestions(industry, target_audience)
+            logger.error(f"Failed to fetch Google Fonts list: {e}")
+            return self._get_popular_fonts_list()
     
-    def _get_fallback_suggestions(self, industry: str, target_audience: str) -> Dict[str, Any]:
-        """Generate fallback style suggestions"""
+    def _get_popular_fonts_list(self) -> List[Dict[str, Any]]:
+        """Возвращает список популярных шрифтов без API"""
         
-        base_config = current_app.config['DEFAULT_CONFIG'].copy()
-        
-        styles = [
-            {
-                'name': 'Professional',
-                'description': 'Clean, corporate design suitable for business content',
-                'config': {
-                    **base_config,
-                    'background_color': '#f8f9fa',
-                    'text_color': '#343a40',
-                    'corner_radius': 15,
-                    'padding': 90
-                },
-                'use_case': 'Business presentations, corporate announcements'
-            },
-            {
-                'name': 'Modern Bold',
-                'description': 'Eye-catching design with vibrant colors',
-                'config': {
-                    **base_config,
-                    'background_color': '#6c5ce7',
-                    'text_color': '#ffffff',
-                    'corner_radius': 25,
-                    'padding': 80,
-                    'font_size': 46
-                },
-                'use_case': 'Marketing campaigns, social media engagement'
-            },
-            {
-                'name': 'Minimalist',
-                'description': 'Simple, elegant design focusing on content',
-                'config': {
-                    **base_config,
-                    'background_color': '#ffffff',
-                    'text_color': '#2d3436',
-                    'corner_radius': 0,
-                    'padding': 100,
-                    'text_align': 'center'
-                },
-                'use_case': 'Educational content, thought leadership'
-            }
+        return [
+            {'family': 'Inter', 'category': 'sans-serif', 'variants': ['300', '400', '500', '600', '700']},
+            {'family': 'Roboto', 'category': 'sans-serif', 'variants': ['300', '400', '500', '700']},
+            {'family': 'Open Sans', 'category': 'sans-serif', 'variants': ['300', '400', '600', '700']},
+            {'family': 'Lato', 'category': 'sans-serif', 'variants': ['300', '400', '700']},
+            {'family': 'Montserrat', 'category': 'sans-serif', 'variants': ['300', '400', '500', '600', '700']},
+            {'family': 'Poppins', 'category': 'sans-serif', 'variants': ['300', '400', '500', '600', '700']},
+            {'family': 'Source Sans Pro', 'category': 'sans-serif', 'variants': ['300', '400', '600', '700']},
+            {'family': 'Nunito', 'category': 'sans-serif', 'variants': ['300', '400', '600', '700']},
+            {'family': 'PT Sans', 'category': 'sans-serif', 'variants': ['400', '700']},
+            {'family': 'Raleway', 'category': 'sans-serif', 'variants': ['300', '400', '500', '600', '700']},
+            {'family': 'Playfair Display', 'category': 'serif', 'variants': ['400', '700']},
+            {'family': 'Merriweather', 'category': 'serif', 'variants': ['300', '400', '700']},
+            {'family': 'Lora', 'category': 'serif', 'variants': ['400', '700']},
+            {'family': 'Crimson Text', 'category': 'serif', 'variants': ['400', '600', '700']},
         ]
-        
-        return {
-            'success': True,
-            'styles': styles,
-            'industry': industry,
-            'target_audience': target_audience,
-            'note': 'Fallback suggestions as AI generation was not available'
-        }
