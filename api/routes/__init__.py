@@ -26,6 +26,12 @@ def register_blueprints(app):
         from .carousel import CarouselGenerateResource, ConfigGenerateResource
         from .health import HealthResource, StatusResource
         from .docs import DocumentationResource
+        from .fonts import (
+            FontsListResource, 
+            FontPreviewResource, 
+            FontRecommendationsResource,
+            FontCacheResource
+        )
         
         # Carousel endpoints
         api.add_resource(
@@ -58,6 +64,31 @@ def register_blueprints(app):
             DocumentationResource,
             '/docs',
             endpoint='docs'
+        )
+        
+        # Fonts endpoints
+        api.add_resource(
+            FontsListResource,
+            '/fonts',
+            endpoint='fonts_list'
+        )
+        
+        api.add_resource(
+            FontPreviewResource,
+            '/fonts/preview',
+            endpoint='font_preview'
+        )
+        
+        api.add_resource(
+            FontRecommendationsResource,
+            '/fonts/recommendations',
+            endpoint='font_recommendations'
+        )
+        
+        api.add_resource(
+            FontCacheResource,
+            '/fonts/cache',
+            endpoint='font_cache'
         )
         
         logger.info("API resources registered successfully")
