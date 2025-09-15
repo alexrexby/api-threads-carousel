@@ -22,7 +22,7 @@
 ### Установка
 
 ```bash
-git clone https://github.com/yourusername/api-threads-carousel.git
+git clone https://github.com/alexrexby/api-threads-carousel.git
 cd api-threads-carousel
 pip install -r requirements.txt
 ```
